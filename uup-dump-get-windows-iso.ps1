@@ -19,18 +19,21 @@ $TARGETS = @{
     # see https://en.wikipedia.org/wiki/Windows_10_version_history
     "windows-10" = @{
         search = "cumulative update windows 10 19042 amd64" # aka 20H2. Enterprise EOL: May 9, 2023.
-        editions = @("Professional")
+        edition = "Professional"
+        virtualEdition = "Enterprise"
     }
     # see https://en.wikipedia.org/wiki/Windows_11
     # see https://en.wikipedia.org/wiki/Windows_11_version_history
     "windows-11" = @{
         search = "cumulative update windows 11 22000 amd64" # aka 21H2. Enterprise EOL: October 8, 2024.
-        editions = @("Professional")
+        edition = "Professional"
+        virtualEdition = "Enterprise"
     }
     # see https://en.wikipedia.org/wiki/Windows_Server_2022
     "windows-2022" = @{
         search = "feature update server operating system 20348 amd64" # aka 21H2. Mainstream EOL: October 13, 2026.
-        editions = @("ServerStandard")
+        edition = "ServerStandard"
+        virtualEdition = $null
     }
 }
 
@@ -42,7 +45,7 @@ function New-QueryString([hashtable]$parameters) {
 
 function Get-UupDumpIso($name, $target) {
     Write-Host "Getting the $name metadata"
-    # see https://github.com/uup-dump/json-api
+    # see https://git.uupdump.net/uup-dump/json-api
     $result = Invoke-RestMethod `
         -Method Get `
         -Uri 'https://api.uupdump.net/listid.php' `
@@ -109,10 +112,10 @@ function Get-UupDumpIso($name, $target) {
             # only return builds that:
             #   1. are from the retail channel
             #   2. have the english language
-            #   3. match all the requested editions
+            #   3. match the requested edition
             $_.Value.info.ring -eq 'RETAIL' `
                 -and $_.Value.langs.PSObject.Properties.Name -eq 'en-us' `
-                -and (Compare-object -ExcludeDifferent $target.editions $_.Value.editions.PSObject.Properties.Name).Length -eq $target.editions.Length
+                -and $_.Value.editions.PSObject.Properties.Name -eq $target.edition
         } `
         | Select-Object -First 1 `
         | ForEach-Object {
@@ -122,23 +125,28 @@ function Get-UupDumpIso($name, $target) {
                 title = $_.Value.title
                 build = $_.Value.build
                 id = $id
+                edition = $target.edition
+                virtualEdition = $target.virtualEdition
                 apiUrl = 'https://api.uupdump.net/get.php?' + (New-QueryString @{
                     id = $id
                     lang = 'en-us'
-                    edition = $target.editions -join ';'
+                    edition = $target.edition
                     #noLinks = '1' # do not return the files download urls.
                 })
                 downloadUrl = 'https://uupdump.net/download.php?' + (New-QueryString @{
                     id = $id
                     pack = 'en-us'
-                    edition = $target.editions -join ';'
+                    edition = $target.edition
                 })
                 # NB you must use the HTTP POST method to invoke this packageUrl
-                #    AND in the body you must include autodl=2 updates=1 cleanup=1.
+                #    AND in the body you must include:
+                #           autodl=2 updates=1 cleanup=1
+                #           OR
+                #           autodl=3 updates=1 cleanup=1 virtualEditions[]=Enterprise
                 downloadPackageUrl = 'https://uupdump.net/get.php?' + (New-QueryString @{
                     id = $id
                     pack = 'en-us'
-                    edition = $target.editions -join ';'
+                    edition = $target.edition
                 })
             }
         }
@@ -189,16 +197,33 @@ function Get-WindowsIso($name, $destinationDirectory) {
     }
     New-Item -ItemType Directory -Force $buildDirectory | Out-Null
 
-    Write-Host "Downloading the UUP dump download package"
-    Invoke-WebRequest `
-        -Method Post `
-        -Uri $iso.downloadPackageUrl `
-        -Body @{
+    # define the iso title.
+    $edition = if ($iso.virtualEdition) {
+        $iso.virtualEdition
+    } else {
+        $iso.edition
+    }
+    $title = "$name $edition $($iso.build)"
+
+    Write-Host "Downloading the UUP dump download package for $title"
+    $downloadPackageBody = if ($iso.virtualEdition) {
+        @{
+            autodl = 3
+            updates = 1
+            cleanup = 1
+            'virtualEditions[]' = $iso.virtualEdition
+        }
+    } else {
+        @{
             autodl = 2
             updates = 1
             cleanup = 1
-            #'virtualEditions[0]' = 'Enterprise' # TODO this seems to be the default, so maybe we do not really need it.
-        } `
+        }
+    }
+    Invoke-WebRequest `
+        -Method Post `
+        -Uri $iso.downloadPackageUrl `
+        -Body $downloadPackageBody `
         -OutFile "$buildDirectory.zip" `
         | Out-Null
     Expand-Archive "$buildDirectory.zip" $buildDirectory
@@ -212,7 +237,7 @@ function Get-WindowsIso($name, $destinationDirectory) {
                 -replace '^(SkipWinRE\s*)=.*','$1=1'
         )
 
-    Write-Host "Creating the $name iso file"
+    Write-Host "Creating the $title iso file"
     Push-Location $buildDirectory
     # NB we have to use powershell cmd to workaround:
     #       https://github.com/PowerShell/PowerShell/issues/6850
